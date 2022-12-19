@@ -27,6 +27,21 @@ def soft_thresholding_operator(v, k):
     )
 
 
+def medium_thresholding_operator(v, n, k_mult, EPS=1e-10):
+    """
+    Medium-thresholding operator, calculates k based on desired n largest v's
+    then applies Soft-thresholding using the calculated k.
+    """
+    if len(v) == 0:
+        raise ValueError("Lenght of v cannot be 0.")
+    u_sorted_neg, rix = np.unique(-np.abs(v), return_inverse=True)
+    k = -(u_sorted_neg[min(n-1, len(u_sorted_neg)-1)] + EPS) * k_mult
+    top_n_mask = np.where(rix < n, 1, 0).reshape(v.shape)
+    return np.multiply(
+        np.multiply(np.divide(1 - k, np.abs(v)), v), top_n_mask
+    )
+
+
 class SpDMD(DMD):
     """
     Sparsity-Promoting Dynamic Mode Decomposition. Promotes solutions having an
@@ -86,7 +101,8 @@ class SpDMD(DMD):
                  abs_tolerance=1.0e-6, rel_tolerance=1.0e-4,
                  max_iterations=10000, rho=1, gamma=10, verbose=True,
                  enforce_zero=True, release_memory=True,
-                 zero_absolute_tolerance=1.e-12):
+                 zero_absolute_tolerance=1.e-12, thresholding_type='soft',
+                 k_mult=1):
         super().__init__(
             svd_rank=svd_rank,
             tlsq_rank=tlsq_rank,
@@ -99,6 +115,8 @@ class SpDMD(DMD):
 
         self.rho = rho
         self.gamma = gamma
+        self.k_mult = k_mult
+        self.thresholding_type = thresholding_type
         self._max_iterations = max_iterations
         self._abs_tol = abs_tolerance
         self._rel_tol = rel_tolerance
@@ -161,7 +179,7 @@ class SpDMD(DMD):
             self._Plow.conj().T, solve(self._Plow, self._q + uk * self.rho / 2)
         )
 
-    def _update_beta(self, alpha, lmbd):
+    def _update_beta(self, alpha, lmbd, i):
         """
         Update the vector :math:`\\beta` of non-zero amplitudes.
         :param np.ndarray alpha: Updated value of :math:`\\alpha_{k+1}` (vector
@@ -171,9 +189,22 @@ class SpDMD(DMD):
         :return: The updated value :math:`\\beta_{k+1}`.
         :rtype: np.ndarray
         """
-        return soft_thresholding_operator(
-            alpha + lmbd / self.rho, self.gamma / self.rho
-        )
+        if self.thresholding_type == 'soft':
+            return soft_thresholding_operator(
+                alpha + lmbd / self.rho, self.gamma / self.rho
+            )
+        elif 'medium' in self.thresholding_type:
+            n = self.gamma
+            if 'gradual' in self.thresholding_type and i != self._max_iterations:
+                n += int(
+                    ( alpha.shape[0] - self.gamma )
+                    / ( self._max_iterations / (self._max_iterations - i) )
+                )
+            return medium_thresholding_operator(
+                alpha + lmbd / self.rho, n, self.k_mult
+            )
+        else:
+            raise ValueError("Invalid thresholding_type.")
 
     def _update_lagrangian(self, alpha, beta, lmbd):
         """
@@ -189,7 +220,7 @@ class SpDMD(DMD):
         """
         return lmbd + (alpha - beta) * self.rho
 
-    def _update(self, beta, lmbd):
+    def _update(self, beta, lmbd, i):
         """
         Operate an entire step of ADMM.
         :param np.ndarray beta: Current value of :math:`\\beta_k` (vector of
@@ -201,7 +232,7 @@ class SpDMD(DMD):
         :rtype: tuple
         """
         a_new = self._update_alpha(beta, lmbd)
-        b_new = self._update_beta(a_new, lmbd)
+        b_new = self._update_beta(a_new, lmbd, i)
         l_new = self._update_lagrangian(a_new, b_new, lmbd)
 
         return a_new, b_new, l_new
@@ -247,13 +278,13 @@ class SpDMD(DMD):
         # initial values of lmbd and beta are all 0
         beta0 = np.zeros(n_amplitudes, dtype="complex")
         lmbd0 = np.zeros(n_amplitudes, dtype="complex")
-
-        # perform a first step of ADMM
-        alpha, beta, lmbd = self._update(beta0, lmbd0)
-        old_beta = beta0
-
+        
         # count the number of iterations of ADMM
         i = 0
+
+        # perform a first step of ADMM
+        alpha, beta, lmbd = self._update(beta0, lmbd0, i)
+        old_beta = beta0
 
         # at the beginning of each iteration check if ADMM can stop (because of
         # loop_condition or number of iterations)
@@ -262,7 +293,7 @@ class SpDMD(DMD):
             i += 1
 
             old_beta = beta
-            alpha, beta, lmbd = self._update(beta, lmbd)
+            alpha, beta, lmbd = self._update(beta, lmbd, i)
 
         if self._verbose:
             print("ADMM: {} iterations".format(i))

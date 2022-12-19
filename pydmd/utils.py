@@ -64,11 +64,13 @@ def compute_svd(X, svd_rank=0):
         tau = np.median(s) * omega(beta)
         rank = np.sum(s > tau)
         if rank == 0:
-            warnings.warn(
+            w = RuntimeWarning(
                 'SVD optimal rank is 0. The largest singular values are '
-                'indistinguishable from noise. Setting rank truncation to 1.',
-                RuntimeWarning
+                'indistinguishable from noise. Setting rank truncation to 1.'
             )
+            w.tau = tau
+            w.s = s
+            warnings.warn(w)
             rank = 1
     elif 0 < svd_rank < 1:
         cumulative_energy = np.cumsum(s**2 / (s**2).sum())

@@ -69,7 +69,8 @@ class HankelDMD(DMDBase):
         d=1,
         sorted_eigs=False,
         reconstruction_method="first",
-        tikhonov_regularization=None,
+        sub_dmd_class=DMD,
+        sub_class_args={"tikhonov_regularization": None}
     ):
         super().__init__(
             svd_rank=svd_rank,
@@ -96,7 +97,7 @@ class HankelDMD(DMDBase):
                 )
         self._reconstruction_method = reconstruction_method
 
-        self._sub_dmd = DMD(
+        self._sub_dmd = sub_dmd_class(
             svd_rank=svd_rank,
             tlsq_rank=tlsq_rank,
             exact=exact,
@@ -104,7 +105,7 @@ class HankelDMD(DMDBase):
             rescale_mode=rescale_mode,
             forward_backward=forward_backward,
             sorted_eigs=sorted_eigs,
-            tikhonov_regularization=tikhonov_regularization,
+            **sub_class_args,
         )
 
     @property
