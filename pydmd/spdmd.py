@@ -1,14 +1,15 @@
+
 """Derived module from dmdbase.py for sparsity-promoting DMD."""
 
 import numpy as np
-from numpy.linalg import solve
+from numpy.linalg import solve, lstsq, LinAlgError
 
 from scipy.sparse import (
     csc_matrix as sparse,
     vstack as spvstack,
     hstack as sphstack,
 )
-from scipy.sparse.linalg import spsolve
+from scipy.sparse.linalg import spsolve, lsqr
 
 from .dmd import DMD
 
@@ -124,6 +125,7 @@ class SpDMD(DMD):
         self._enforce_zero = enforce_zero
         self._release_memory = release_memory
         self._zero_absolute_tolerance = zero_absolute_tolerance
+        self.verbose = verbose
 
         self._P = None
         self._q = None
@@ -146,6 +148,7 @@ class SpDMD(DMD):
         # Cholesky factorization of matrix P + (rho/2)*I
         Prho = P + np.identity(len(self.amplitudes)) * self.rho / 2
         self._Plow = np.linalg.cholesky(Prho)
+        
 
         # find which amplitudes are to be set to 0
         zero_amplitudes = self._find_zero_amplitudes()
@@ -175,9 +178,22 @@ class SpDMD(DMD):
         :rtype: np.ndarray
         """
         uk = beta - lmbd / self.rho
-        return solve(
-            self._Plow.conj().T, solve(self._Plow, self._q + uk * self.rho / 2)
-        )
+        try:
+            return solve(
+                self._Plow.conj().T, solve(self._Plow, self._q + uk * self.rho / 2)
+            )
+        except LinAlgError as e:
+            try:
+                return lstsq(
+                    self._Plow.conj().T,
+                    lstsq(self._Plow, self._q + uk * self.rho / 2)
+                )
+            except Exception as e:
+                print(self._Plow)
+                print(self._q + uk * self.rho / 2)
+                print("\n\n\n")
+                self._optimal_dmd_matrices(verbose=True)
+                raise e
 
     def _update_beta(self, alpha, lmbd, i):
         """
@@ -343,6 +359,13 @@ class SpDMD(DMD):
         )
 
         opt_amps = spsolve(KKT, rhs)[:n_amplitudes]
+        if np.all(np.isnan(opt_amps)):
+            try:
+                opt_amps = lsqr(KKT, rhs)[0][:n_amplitudes]
+            except Exception as e:
+                self._optimal_dmd_matrices(verbose=True)
+                raise e
+        
         if self._enforce_zero:
             opt_amps[zero_amplitudes] = 0
         return opt_amps

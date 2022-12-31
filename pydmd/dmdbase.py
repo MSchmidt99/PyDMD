@@ -186,6 +186,7 @@ class DMDBase(object):
         forward_backward=False,
         sorted_eigs=False,
         tikhonov_regularization=None,
+        inf_thresh=1e6
     ):
 
         self._Atilde = DMDOperator(
@@ -207,6 +208,8 @@ class DMDBase(object):
         self._snapshots_shape = None
 
         self._modes_activation_bitmask_proxy = None
+        
+        self.inf_thresh = inf_thresh
 
     @property
     def opt(self):
@@ -722,13 +725,21 @@ matrix, or regularization methods.""".format(
 
         return snapshots, snapshots_shape
 
-    def _optimal_dmd_matrices(self):
+    def _optimal_dmd_matrices(self, verbose=False):
         # compute the vandermonde matrix
         vander = np.vander(self.eigs, len(self.dmd_timesteps), True)
+        if np.any(np.isinf(vander) | np.isnan(vander) | (np.abs(vander) > self.inf_thresh)):
+            idx_malform = np.argwhere(
+                np.isinf(vander)
+                | np.isnan(vander)
+                | (np.abs(vander) > self.inf_thresh)
+            )[:,0]
+            vander[idx_malform, :] = 1.
+        vander_dot = np.dot(vander, vander.conj().T)
 
         P = np.multiply(
             np.dot(self.modes.conj().T, self.modes),
-            np.conj(np.dot(vander, vander.conj().T)),
+            np.conj(vander_dot),
         )
 
         if self.exact:
@@ -745,6 +756,10 @@ matrix, or regularization methods.""".format(
                                      np.diag(s).conj(),
                                      self.operator.eigenvectors])))
 
+        if verbose:
+            print(vander)
+            print(P)
+            print(q)
         return P, q
 
     def _compute_amplitudes(self):
