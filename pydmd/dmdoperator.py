@@ -153,10 +153,24 @@ class DMDOperator():
         :return: the lowrank operator
         :rtype: numpy.ndarray
         """
+        
         if self._tikhonov_regularization is not None:
-            s = (s**2 + self._tikhonov_regularization * self._norm_X) \
-                * np.reciprocal(s)
-        return np.linalg.multi_dot([U.T.conj(), Y, V]) * np.reciprocal(s)
+            s = np.divide(
+                s**2
+                + self._tikhonov_regularization
+                * self._norm_X,
+                s,
+                out=np.zeros_like(s),
+                where=s!=0
+            )
+        numerator = np.linalg.multi_dot([U.T.conj(), Y, V])
+        s_broadcast = np.broadcast_to(s, numerator.shape)
+        return np.divide(
+            numerator,
+            s_broadcast,
+            out=np.zeros_like(s_broadcast),
+            where=s_broadcast!=0
+        )
 
     def _compute_eigenquantities(self):
         """
