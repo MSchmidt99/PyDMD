@@ -193,7 +193,6 @@ def get_candidateZ_corr_data(
             corr_range_start,
             corr_range_end
         )
-#         print(rot)
     
     Xi *= (1j*np.sin(rot) + np.cos(rot))
     candidate_dynamics *= (1j*np.sin(rot) + np.cos(rot))
@@ -347,7 +346,6 @@ class ZDecomposition:
             np.nanmean(signal[Z['start']:Z['end']]**2)
             / np.nanmean(Z_dynamics[Z['start']:Z['end']]**2)
         )**0.5
-        print(scale)
         
         Z['Xi'] *= scale
 

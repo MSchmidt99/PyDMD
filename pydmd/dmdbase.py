@@ -725,7 +725,7 @@ matrix, or regularization methods.""".format(
 
         return snapshots, snapshots_shape
 
-    def _optimal_dmd_matrices(self, verbose=False):
+    def _optimal_dmd_matrices(self):
         # compute the vandermonde matrix
         vander = np.vander(self.eigs, len(self.dmd_timesteps), True)
         if np.any(np.isinf(vander) | np.isnan(vander) | (np.abs(vander) > self.inf_thresh)):
@@ -756,10 +756,6 @@ matrix, or regularization methods.""".format(
                                      np.diag(s).conj(),
                                      self.operator.eigenvectors])))
 
-        if verbose:
-            print(vander)
-            print(P)
-            print(q)
         return P, q
 
     def _compute_amplitudes(self):
