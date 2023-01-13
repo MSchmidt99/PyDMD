@@ -34,13 +34,30 @@ def discard_small_corr(corr, Z, perturbation_thresh=0.001):
         corr = corr[::-1]
 
     for i in range(1, corr.shape[0]):
-        perturbation_distance = np.abs(corr[i] - corr[i-1]) if not (np.isnan(corr[i]) or np.isnan(corr[i-1])) else 0
+        perturbation_distance = (
+            np.abs(corr[i] - corr[i-1])
+            if not (np.isnan(corr[i]) or np.isnan(corr[i-1]))
+            else 0
+        )
         if perturbation_distance > perturbation_thresh:
             corr[:i] = np.nan
             break
         if i == corr.shape[0] - 1:
             corr[:] = np.nan
     return corr[::-1] if reverse else corr
+
+
+@nb.njit
+def rolling_var(a):
+    a_pad = np.concatenate((
+        np.array([a[0]]),
+        a,
+        np.array([a[-1]]),
+    ))
+    return (
+        np.convolve(a_pad**2, np.array([1.,1.,1.]))
+        - (np.convolve(a_pad, np.array([1.,1.,1.]))**2 / 3)
+    )[2:-2]
 
 
 @nb.njit
@@ -108,46 +125,68 @@ def expand_window_edges(corr, start, end, corr_thresh=-0.002):
     return start, end
 
 
-def optimize_rotation(
-    window_centered_signal, candidate_dynamics, corr_range_start, corr_range_end
+def optimize_phasor(
+    signal, candidate_dynamics, candidate_exponential, start, end,
+    phi_bound=np.pi/4, amp_bound=10
 ):
-    return minimize(
-        lambda x: -np.sum(
-            calculate_corr(
-                window_centered_signal[corr_range_start:corr_range_end],
+    res = minimize(
+        lambda x: np.sum(
+            np.abs(
                 (
-                    1j*np.sin(x[0]) + np.cos(x[0])
-                ) * candidate_dynamics[corr_range_start:corr_range_end]
-            ).real
+                    np.diff(signal[start:end])
+                    - np.diff(
+                        (1j*np.sin(x[0]) + np.cos(x[0]))
+                        * x[1] * candidate_dynamics[start:end]
+                    )
+                ).real# / candidate_exponential[start:end] # avoids skewed min
+            )
         ),
-        [0],
-        bounds=[(-np.pi/2, np.pi/2)]
-    ).x[0]
+        [0, 1],
+        bounds=[(-phi_bound, phi_bound), (1/amp_bound, amp_bound)]
+    )
+    return res.x
 
 
 @nb.njit
 def get_candidateZ_corr_data(
-    window_centered_signal, window_len, Z, Xi, t0, perturbation_thresh=0.001,
+    signal, window_len, Z, Xi, t0, perturbation_thresh=0.001,
     corr_thresh=-0.002, min_wavelength_match=0.5, wav_mag_thresh=0
 ):
     candidate_dynamics = calculate_dynamics(
         Z,
         Xi,
-        window_centered_signal.shape[0],
+        signal.shape[0],
         t0
     )
-    candidate_real = candidate_dynamics.real
     candidate_exponential = calculate_dynamics(
         np.abs(Z),
         np.abs(Xi),
-        window_centered_signal.shape[0],
+        signal.shape[0],
         t0
     ).real
+    # phase needs a slight nudge to begin, typically slightly off from Xi calc
+    data = np.array([0., 0.])
+    with nb.objmode(data='float64[:]'):
+        data += optimize_phasor(
+            signal,
+            candidate_dynamics,
+            candidate_exponential,
+            t0,
+            t0 + window_len
+        )
+    mod_phasor = (1j*np.sin(data[0]) + np.cos(data[0])) * data[1]
+    Xi *= mod_phasor
+    candidate_dynamics *= mod_phasor
+    candidate_exponential *= data[1]
+    candidate_real = candidate_dynamics.real
+    
+    small_signal_var = (rolling_var(signal) ** 0.5) < perturbation_thresh
 
-    corr = calculate_corr(window_centered_signal, candidate_real)
+    corr = calculate_corr(signal, candidate_real)
     corr[
         np.abs(candidate_real) < (candidate_exponential / (np.sqrt(2)*3))
     ] = np.nan
+    corr[small_signal_var] = np.nan
     corr = discard_small_corr(corr, Z, perturbation_thresh=perturbation_thresh)
 
     corr_range_start, corr_range_end = expand_window_midpoint(
@@ -161,7 +200,7 @@ def get_candidateZ_corr_data(
             -1, # start
             -1, # end
             0, # len
-            0, # sum_corr
+            np.inf, # window_error
             np.array([np.nan]), # corr
             1
         )
@@ -178,43 +217,30 @@ def get_candidateZ_corr_data(
             -1, # start
             -1, # end
             0, # len
-            0, # sum_corr
+            np.inf, # window_error
             np.array([np.nan]), # corr
             1
         )
     
-    # Xi still contains some numerical inaccuracy in the phase and,
-    # by proxy, the amplitude. Can optimize from -pi/2 to pi/2.
-    rot = 0.
-    with nb.objmode(rot='float64'):
-        rot += optimize_rotation(
-            window_centered_signal,
+    # fix phase
+    data = np.array([0., 0.])
+    with nb.objmode(data='float64[:]'):
+        data += optimize_phasor(
+            signal,
             candidate_dynamics,
+            candidate_exponential,
             corr_range_start,
             corr_range_end
         )
-    
-    Xi *= (1j*np.sin(rot) + np.cos(rot))
-    candidate_dynamics *= (1j*np.sin(rot) + np.cos(rot))
+    mod_phasor = (1j*np.sin(data[0]) + np.cos(data[0])) * data[1]
+    Xi *= mod_phasor
+    candidate_dynamics *= mod_phasor
+    candidate_exponential *= data[1]
     candidate_real = candidate_dynamics.real
     
-    _corr = calculate_corr(window_centered_signal, candidate_real)
+    _corr = calculate_corr(signal, candidate_real)
     _corr = discard_small_corr(_corr, Z, perturbation_thresh=perturbation_thresh)
-    _corr[
-        np.isnan(
-            discard_small_corr(
-                window_centered_signal,
-                0.9,
-                perturbation_thresh=perturbation_thresh
-            )
-        ) | np.isnan(
-            discard_small_corr(
-                window_centered_signal,
-                1.1,
-                perturbation_thresh=perturbation_thresh
-            )
-        )
-    ] = np.nan
+    _corr[small_signal_var] = np.nan
 
     corr_range_start, corr_range_end = expand_window_edges(
         _corr,
@@ -222,12 +248,41 @@ def get_candidateZ_corr_data(
         corr_range_end,
         corr_thresh=corr_thresh
     )
+    
+    # fix phase again...
+    data = np.array([0., 0.])
+    with nb.objmode(data='float64[:]'):
+        data += optimize_phasor(
+            signal,
+            candidate_dynamics,
+            candidate_exponential,
+            corr_range_start,
+            corr_range_end
+        )
+    mod_phasor = (1j*np.sin(data[0]) + np.cos(data[0])) * data[1]
+    Xi *= mod_phasor
+    candidate_dynamics *= mod_phasor
+    candidate_exponential *= data[1]
+    candidate_real = candidate_dynamics.real
+    
+    # fix scale factor
+    scale = (
+        np.nanmean(signal[corr_range_start:corr_range_end]**2)
+        / np.nanmean(candidate_real[corr_range_start:corr_range_end]**2)
+    )**0.5
+    Xi *= scale
+    candidate_real *= scale
 
     return (
         corr_range_start,
         corr_range_end,
         corr_range_end - corr_range_start, # len
-        np.nansum(np.sqrt(corr[corr_range_start:corr_range_end])), # sum_corr
+        np.mean((
+            # use difference to improve matching in offset signals.
+            # copy needed for numba bug.
+            np.diff(signal[corr_range_start:corr_range_end].copy())
+            - np.diff(candidate_real[corr_range_start:corr_range_end].copy())
+        ) ** 2), # window_error
         corr, # corr
         Xi # new Xi
     )
@@ -244,31 +299,32 @@ class ZDecomposition:
     def get_hankel_candidate_Zs(
         self, signal, window_len, min_freq=0, max_freq=np.inf,
         perturbation_thresh=0.001, corr_thresh=-0.002, min_wavelength_match=0.5,
-        wav_mag_thresh=0
+        wav_mag_thresh=0, use_diff=False
     ):
+        
         warnings.filterwarnings("error", **WARN_KWARGS)
         candidate_Zs = []
         noisy_window_count = 0
         for i in range(signal.shape[0] - window_len):
             try:
-                signal_window = signal[i:i+window_len]
-                # TODO: replace median/mean with something more akin to a mode
-#                 offset = np.mean(signal_window)
-                centered_signal_window = signal_window.copy()# - offset
-                window_centered_signal = signal.copy()# - offset
+                hdmd_signal_window = signal[i:i+window_len]
+                if use_diff:
+                    hdmd_signal_window = np.diff(hdmd_signal_window)
 
                 try:
                     hdmd = copy.deepcopy(self.HDMD_obj)
-                    hdmd.fit(centered_signal_window)
+                    hdmd.fit(hdmd_signal_window)
                 except RuntimeWarning as w:
                     if w.tau - np.amax(w.s) > self.optimal_rank_tol:
                         raise w
                     warnings.filterwarnings("ignore", **WARN_KWARGS)
                     hdmd = copy.deepcopy(self.HDMD_obj)
-                    hdmd.fit(centered_signal_window)
+                    hdmd.fit(hdmd_signal_window)
                     warnings.filterwarnings("error", **WARN_KWARGS)
 
-                freqs = np.log(hdmd.eigs).imag / (2*np.pi)
+                with np.errstate(divide='ignore'):
+                    freqs = np.log(hdmd.eigs).imag / (2*np.pi)
+                
                 dynamics_idx = np.argwhere(
                     (freqs > min_freq)
                     & (freqs < max_freq)
@@ -280,13 +336,18 @@ class ZDecomposition:
                     Xi = np.mean(
                         hdmd.modes[:,d_idx]
                         / np.power(
-                            np.repeat(hdmd.eigs[d_idx], hdmd.d),
+                            np.repeat(Z, hdmd.d),
                             np.arange(hdmd.d)[::-1]
                         )
                     ) * hdmd.amplitudes[d_idx]
+                    if use_diff:
+                        Xi /= (
+                            np.log(Z) # derivative scaling
+#                             * (Z ** -0.5) # half step shift for midpoint centered difference
+                        )
 
                     corr_data = get_candidateZ_corr_data(
-                        window_centered_signal,
+                        signal,
                         window_len,
                         Z,
                         Xi,
@@ -303,11 +364,10 @@ class ZDecomposition:
                         'M': hdmd.modes[:,d_idx],
                         'Xi': corr_data[5],
                         't0': i,
-#                         'offset': offset,
                         'start': corr_data[0],
                         'end': corr_data[1],
                         'len': corr_data[2],
-                        'sum_corr': corr_data[3],
+                        'window_error': corr_data[3],
                         'corr': corr_data[4]
                     })
             except RuntimeWarning as w:
@@ -317,17 +377,21 @@ class ZDecomposition:
     def sift(
         self, signal, window_len, min_freq=0, max_freq=np.inf,
         perturbation_thresh=0.001, corr_thresh=-0.002, min_wavelength_match=0.5,
-        wav_mag_thresh=0
+        wav_mag_thresh=0, use_diff=False
     ):
-        wav_mag_thresh = np.std(signal) * 0.5
         candidate_Zs, noisy_window_count = self.get_hankel_candidate_Zs(
             signal, window_len, min_freq=min_freq, max_freq=max_freq,
             perturbation_thresh=perturbation_thresh, corr_thresh=corr_thresh,
             min_wavelength_match=min_wavelength_match, wav_mag_thresh=wav_mag_thresh,
+            use_diff=use_diff
         )
 
-        sum_corrs = np.array([candidate_Z['sum_corr'] for candidate_Z in candidate_Zs])
-        best_Z_idx = np.argmax(sum_corrs)
+        errors = np.array([
+            candidate_Z['window_error'] / candidate_Z['len']
+            if candidate_Z['len'] else np.inf
+            for candidate_Z in candidate_Zs
+        ])
+        best_Z_idx = np.argmin(errors)
 
         Z = candidate_Zs[best_Z_idx]
         
@@ -341,14 +405,8 @@ class ZDecomposition:
             signal.shape[0],
             Z['t0']
         ).real
-        
-        scale = (
-            np.nanmean(signal[Z['start']:Z['end']]**2)
-            / np.nanmean(Z_dynamics[Z['start']:Z['end']]**2)
-        )**0.5
-        
-        Z['Xi'] *= scale
 
-        signal[Z['start']:Z['end']] -= (Z_dynamics[Z['start']:Z['end']] * scale)
+        residual = signal.copy()
+        residual[Z['start']:Z['end']] -= Z_dynamics[Z['start']:Z['end']]
 
-        return Z, signal
+        return Z, residual

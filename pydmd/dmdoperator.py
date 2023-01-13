@@ -168,7 +168,7 @@ class DMDOperator():
         return np.divide(
             numerator,
             s_broadcast,
-            out=np.zeros_like(s_broadcast),
+            out=np.zeros_like(numerator),
             where=s_broadcast!=0
         )
 
